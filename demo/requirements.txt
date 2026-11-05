@@ -1,5 +1,5 @@
 streamlit
-pandas
-plotly
-fredapi
 yfinance
+fredapi
+pandas
+google-genai
