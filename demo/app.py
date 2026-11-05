@@ -3,6 +3,7 @@ import yfinance as yf
 from fredapi import Fred
 import pandas as pd
 import datetime
+import time
 
 # --- Gemini SDK 相容性匯入 (相容 google-genai 與 google.generativeai) ---
 GENAI_MODE = None
@@ -296,7 +297,7 @@ with tab4:
 
 st.write("---")
 
-# --- 11. 第五區塊：AI 總體經濟摘要生成 ---
+# --- 11. 第五區塊：AI 總體經濟摘要生成 (具備多模型備援與重試機制) ---
 st.subheader("🤖 AI 總體經濟即時短評")
 
 cpi_item = fred_data["metrics"].get("美國 CPI (年增率)")
@@ -307,13 +308,52 @@ unrate_val = f"{unrate_item['value']:.2f}%" if unrate_item and "value" in unrate
 us10y_val = f"{latest_10y:.2f}%" if latest_10y is not None else "無資料"
 spread_val = f"{latest_spread:+.2f}%" if latest_spread is not None else "無資料"
 
+def generate_macro_summary(prompt_text, api_key):
+    """嘗試依序呼叫不同模型，遇 503 自動退避重試並降級備援"""
+    # 候選模型清單（按優先順序嘗試）
+    candidate_models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-3.8-flash"]
+    last_err = None
+
+    if GENAI_MODE == "google-genai":
+        client = genai.Client(api_key=api_key)
+        for model_name in candidate_models:
+            for retry in range(2):  # 每個模型嘗試最多 2 次
+                try:
+                    res = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt_text,
+                    )
+                    return res.text, model_name
+                except Exception as e:
+                    last_err = e
+                    # 若為 503 或高負載，稍作暫停再重試或換模型
+                    if "503" in str(e) or "high demand" in str(e).lower():
+                        time.sleep(1.0)
+                        continue
+                    else:
+                        break  # 非負載問題則換下一個模型
+
+    elif GENAI_MODE == "google-generativeai":
+        legacy_genai.configure(api_key=api_key)
+        for model_name in ["gemini-1.5-flash", "gemini-1.5-pro"]:
+            try:
+                model = legacy_genai.GenerativeModel(model_name)
+                res = model.generate_content(prompt_text)
+                return res.text, model_name
+            except Exception as e:
+                last_err = e
+                time.sleep(1.0)
+
+    raise last_err if last_err else Exception("所有備援模型皆無法回應")
+
+
 if st.button("產生 AI 總體經濟摘要", type="primary"):
     if GENAI_MODE is None:
         st.error("環境中尚未安裝 Gemini SDK，請在專案的 `requirements.txt` 中加入 `google-genai` 並重新部署。")
     elif not GEMINI_API_KEY:
         st.error("請先設定 `GEMINI_API_KEY`（可於左側側邊欄輸入或在 `.streamlit/secrets.toml` 配置）。")
     else:
-        with st.spinner("AI 正在分析最新總經數據..."):
+        with st.spinner("AI 正在分析最新總經數據（負載高時自動調用備援線路）..."):
             prompt = f"""
 你是一位專業的宏觀經濟分析師。請根據以下最新抓取的總經指標數據，為投資人撰寫一份約 200 字的客觀精準短評。
 
@@ -329,20 +369,7 @@ if st.button("產生 AI 總體經濟摘要", type="primary"):
 3. 繁體中文撰寫，字數控制在 200 字以內，語氣專業洗鍊。
 """
             try:
-                ai_text = ""
-                if GENAI_MODE == "google-genai":
-                    client = genai.Client(api_key=GEMINI_API_KEY)
-                    response = client.models.generate_content(
-                        model="gemini-3.8-flash",
-                        contents=prompt,
-                    )
-                    ai_text = response.text
-                elif GENAI_MODE == "google-generativeai":
-                    legacy_genai.configure(api_key=GEMINI_API_KEY)
-                    model = legacy_genai.GenerativeModel("gemini-1.5-flash")
-                    response = model.generate_content(prompt)
-                    ai_text = response.text
-
+                ai_text, used_model = generate_macro_summary(prompt, GEMINI_API_KEY)
                 st.markdown(
                     f"""
                     <div style="background-color: #f1f3f5; padding: 16px; border-radius: 8px; border-left: 4px solid #1f77b4; line-height: 1.6;">
@@ -351,5 +378,6 @@ if st.button("產生 AI 總體經濟摘要", type="primary"):
                     """,
                     unsafe_allow_html=True,
                 )
+                st.caption(f"⚡ 由 {used_model} 自動分析生成")
             except Exception as e:
-                st.error(f"生成摘要失敗: {e}")
+                st.error(f"生成摘要失敗（伺服器暫時壅塞，請稍候重試）: {e}")
