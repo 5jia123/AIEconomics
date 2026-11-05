@@ -333,7 +333,7 @@ if st.button("產生 AI 總體經濟摘要", type="primary"):
                 if GENAI_MODE == "google-genai":
                     client = genai.Client(api_key=GEMINI_API_KEY)
                     response = client.models.generate_content(
-                        model="gemini-2.5-flash",
+                        model="gemini-3.8-flash",
                         contents=prompt,
                     )
                     ai_text = response.text
