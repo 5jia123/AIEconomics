@@ -1,9 +1,20 @@
 import streamlit as st
 import yfinance as yf
 from fredapi import Fred
-from google import genai
 import pandas as pd
 import datetime
+
+# --- Gemini SDK 相容性匯入 (相容 google-genai 與 google.generativeai) ---
+GENAI_MODE = None
+try:
+    from google import genai
+    GENAI_MODE = "google-genai"
+except ImportError:
+    try:
+        import google.generativeai as legacy_genai
+        GENAI_MODE = "google-generativeai"
+    except ImportError:
+        GENAI_MODE = None
 
 # --- 1. 頁面基本配置 ---
 st.set_page_config(
@@ -297,13 +308,13 @@ us10y_val = f"{latest_10y:.2f}%" if latest_10y is not None else "無資料"
 spread_val = f"{latest_spread:+.2f}%" if latest_spread is not None else "無資料"
 
 if st.button("產生 AI 總體經濟摘要", type="primary"):
-    if not GEMINI_API_KEY:
+    if GENAI_MODE is None:
+        st.error("環境中尚未安裝 Gemini SDK，請在專案的 `requirements.txt` 中加入 `google-genai` 並重新部署。")
+    elif not GEMINI_API_KEY:
         st.error("請先設定 `GEMINI_API_KEY`（可於左側側邊欄輸入或在 `.streamlit/secrets.toml` 配置）。")
     else:
         with st.spinner("AI 正在分析最新總經數據..."):
-            try:
-                client = genai.Client(api_key=GEMINI_API_KEY)
-                prompt = f"""
+            prompt = f"""
 你是一位專業的宏觀經濟分析師。請根據以下最新抓取的總經指標數據，為投資人撰寫一份約 200 字的客觀精準短評。
 
 【最新宏觀指標】
@@ -317,14 +328,25 @@ if st.button("產生 AI 總體經濟摘要", type="primary"):
 2. 解讀殖利率與利差反映的市場降息/衰退預期。
 3. 繁體中文撰寫，字數控制在 200 字以內，語氣專業洗鍊。
 """
-                response = client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=prompt,
-                )
+            try:
+                ai_text = ""
+                if GENAI_MODE == "google-genai":
+                    client = genai.Client(api_key=GEMINI_API_KEY)
+                    response = client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=prompt,
+                    )
+                    ai_text = response.text
+                elif GENAI_MODE == "google-generativeai":
+                    legacy_genai.configure(api_key=GEMINI_API_KEY)
+                    model = legacy_genai.GenerativeModel("gemini-1.5-flash")
+                    response = model.generate_content(prompt)
+                    ai_text = response.text
+
                 st.markdown(
                     f"""
                     <div style="background-color: #f1f3f5; padding: 16px; border-radius: 8px; border-left: 4px solid #1f77b4; line-height: 1.6;">
-                    {response.text}
+                    {ai_text}
                     </div>
                     """,
                     unsafe_allow_html=True,
