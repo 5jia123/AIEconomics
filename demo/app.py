@@ -1,92 +1,177 @@
 import streamlit as st
-import pandas as pd
-import plotly.express as px
 import yfinance as yf
 from fredapi import Fred
+import pandas as pd
+import datetime
 
-# 頁面基本配置
-st.set_page_config(page_title="總體經濟與金融即時儀表板", layout="wide")
-st.title("🌐 全球總體經濟與金融指標即時儀表板")
+# --- 頁面基本設定 ---
+st.set_page_config(
+    page_title="全球總經與市場監控儀表板",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
-# 側邊欄：輸入 API Key 與刷新控制
-st.sidebar.header("⚙️ 設定與金鑰")
+# 自訂 CSS 提升視覺質感與 KPI 卡片間距
+st.markdown(
+    """
+    <style>
+    div[data-testid="stMetricValue"] {
+        font-size: 1.8rem;
+        font-weight: 700;
+    }
+    div[data-testid="stMetricDelta"] {
+        font-size: 0.95rem;
+    }
+    .metric-card {
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        padding: 12px;
+        border: 1px solid #e9ecef;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-# 優先使用 Streamlit Secrets，若無則讓學生在側邊欄輸入
-if "FRED_API_KEY" in st.secrets:
-    fred_key = st.secrets["FRED_API_KEY"]
-    st.sidebar.success("已自動讀取 Secrets 中的 API Key！")
-else:
-    fred_key = st.sidebar.text_input("請輸入你的 FRED API Key:", type="password")
+# --- 字典設定 ---
+YFINANCE_CONFIG = {
+    "S&P 500": "^GSPC",
+    "黃金現貨 (GC=F)": "GC=F",
+    "原油 (WTI)": "CL=F",
+    "美元指數": "DX-Y.NYB",
+}
 
-if st.sidebar.button("手動刷新數據"):
-    st.cache_data.clear()
+FRED_CONFIG = {
+    "美國 10 年期國債殖利率": "DGS10",
+    "日本 10 年期國債殖利率": "IRLTLT01JPM156N",
+    "美國 CPI (年增率基準)": "CPIAUCSL",
+}
 
-# 1. 抓取 FRED 數據 (設快取 1 小時)
+# --- 初始化 FRED 客戶端 ---
+FRED_API_KEY = st.secrets.get("FRED_API_KEY", None)
+
+# --- 資料讀取與快取函式 ---
 @st.cache_data(ttl=3600)
-def get_fred_data(api_key):
+def get_yfinance_metrics(ticker_dict):
+    results = {}
+    for label, sym in ticker_dict.items():
+        try:
+            ticker = yf.Ticker(sym)
+            hist = ticker.history(period="6mo")
+            if not hist.empty and len(hist) >= 2:
+                latest = hist["Close"].iloc[-1]
+                prev = hist["Close"].iloc[-2]
+                pct_change = ((latest - prev) / prev) * 100
+                results[label] = {
+                    "price": latest,
+                    "change": pct_change,
+                    "history": hist["Close"],
+                }
+            elif not hist.empty:
+                results[label] = {
+                    "price": hist["Close"].iloc[-1],
+                    "change": 0.0,
+                    "history": hist["Close"],
+                }
+        except Exception:
+            results[label] = None
+    return results
+
+@st.cache_data(ttl=86400)
+def get_fred_metrics(series_dict, api_key):
+    results = {}
+    if not api_key:
+        return results
+
     fred = Fred(api_key=api_key)
-    data = {
-        "CPI 物價指數": fred.get_series("CPIAUCSL"),
-        "10年期美債殖利率": fred.get_series("DGS10"),
-        "美國失業率": fred.get_series("UNRATE"),
-        "聯邦基金利率": fred.get_series("FEDFUNDS")
-    }
-    df = pd.DataFrame(data).ffill().tail(365)
-    return df
+    for label, series_id in series_dict.items():
+        try:
+            series = fred.get_series(series_id).dropna()
+            if not series.empty and len(series) >= 2:
+                latest = series.iloc[-1]
+                prev = series.iloc[-2]
+                diff = latest - prev
+                results[label] = {
+                    "value": latest,
+                    "diff": diff,
+                    "date": series.index[-1].strftime("%Y-%m-%d"),
+                    "history": series,
+                }
+        except Exception:
+            results[label] = None
+    return results
 
-# 2. 抓取 Market 數據 (設快取 10 分鐘)
-@st.cache_data(ttl=600)
-def get_market_data():
-    tickers = {
-        "S&P 500": "^GSPC",
-        "台灣加權指數": "^TWII",
-        "布蘭特原油": "BZ=F",
-        "美元/台幣匯率": "TWD=X"
-    }
-    df = yf.download(list(tickers.values()), period="1y")["Close"]
-    df.rename(columns={v: k for k, v in tickers.items()}, inplace=True)
-    return df
+# --- 執行資料載入 ---
+with st.spinner("載入即時市場與總經指標中..."):
+    yf_data = get_yfinance_metrics(YFINANCE_CONFIG)
+    fred_data = get_fred_metrics(FRED_CONFIG, FRED_API_KEY)
 
-# 頁面渲染邏輯
-if fred_key:
-    try:
-        macro_df = get_fred_data(fred_key)
-        market_df = get_market_data()
+# --- 頁面標頭 ---
+st.title("全球金融市場與宏觀利率儀表板")
+st.caption(f"最後更新時間: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-        # 第一區塊：核心 KPI 卡片
-        st.subheader("📊 關鍵總體經濟指標 (FRED)")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        latest_cpi = macro_df["CPI 物價指數"].dropna().iloc[-1]
-        col1.metric("CPI 物價指數", f"{latest_cpi:.1f}")
-        
-        latest_rate = macro_df["10年期美債殖利率"].dropna().iloc[-1]
-        rate_prev = macro_df["10年期美債殖利率"].dropna().iloc[-2]
-        col2.metric("10年美債殖利率", f"{latest_rate:.2f}%", f"{latest_rate - rate_prev:+.2f}%")
-        
-        latest_unemp = macro_df["美國失業率"].dropna().iloc[-1]
-        col3.metric("美國失業率", f"{latest_unemp:.1f}%")
-        
-        latest_fed = macro_df["聯邦基金利率"].dropna().iloc[-1]
-        col4.metric("聯邦基金利率", f"{latest_fed:.2f}%")
+st.write("---")
 
-        # 第二區塊：互動式圖表
-        st.write("---")
-        st.subheader("📈 市場走勢與總體指標折線圖")
-        
-        tab1, tab2 = st.tabs(["金融市場走勢 (yfinance)", "總體經濟趨勢 (FRED)"])
-        
-        with tab1:
-            market_choice = st.selectbox("選擇金融市場標的：", market_df.columns)
-            fig1 = px.line(market_df, y=market_choice, title=f"{market_choice} 近一年走勢")
-            st.plotly_chart(fig1, use_container_width=True)
-            
-        with tab2:
-            macro_choice = st.selectbox("選擇總體經濟指標：", macro_df.columns)
-            fig2 = px.line(macro_df, y=macro_choice, title=f"{macro_choice} 近一年走勢")
-            st.plotly_chart(fig2, use_container_width=True)
+# --- 第一區塊：核心市場指標 (含黃金現貨 GC=F) ---
+st.subheader("大宗商品與關鍵市場資產")
+cols_yf = st.columns(4)
 
-    except Exception as e:
-        st.error(f"數據讀取失敗，請確認 FRED API Key 是否正確。錯誤訊息: {e}")
+for idx, (label, sym) in enumerate(YFINANCE_CONFIG.items()):
+    col = cols_yf[idx % 4]
+    item = yf_data.get(label)
+    with col:
+        if item:
+            st.metric(
+                label=label,
+                value=f"${item['price']:,.2f}" if "指數" not in label else f"{item['price']:,.2f}",
+                delta=f"{item['change']:+.2f}%",
+            )
+        else:
+            st.metric(label=label, value="N/A", delta="無資料")
+
+st.write("")
+
+# --- 第二區塊：全球主要國債殖利率 (含日本 10 年期國債) ---
+st.subheader("全球國債殖利率與總經數據")
+if not FRED_API_KEY:
+    st.warning("尚未在 `.streamlit/secrets.toml` 中配置 `FRED_API_KEY`，無法抓取 FRED 殖利率指標。")
 else:
-    st.info("👈 請在左側輸入您的 FRED API Key 以開啟儀表板。")
+    cols_fred = st.columns(3)
+    for idx, (label, series_id) in enumerate(FRED_CONFIG.items()):
+        col = cols_fred[idx % 3]
+        item = fred_data.get(label)
+        with col:
+            if item:
+                unit = "%" if "殖利率" in label else ""
+                st.metric(
+                    label=f"{label} ({item['date']})",
+                    value=f"{item['value']:.3f}{unit}",
+                    delta=f"{item['diff']:+.3f}{unit}",
+                )
+            else:
+                st.metric(label=label, value="N/A", delta="無資料")
+
+st.write("---")
+
+# --- 第三區塊：走勢折線圖 (兩欄佈局) ---
+st.subheader("趨勢走勢圖")
+tab1, tab2 = st.tabs(["黃金現貨 (GC=F)", "日本 10 年期國債殖利率"])
+
+with tab1:
+    gold_data = yf_data.get("黃金現貨 (GC=F)")
+    if gold_data and not gold_data["history"].empty:
+        chart_df = pd.DataFrame({"黃金結算價 (USD)": gold_data["history"]})
+        st.line_chart(chart_df)
+    else:
+        st.info("黃金歷史數據加載中或無法讀取。")
+
+with tab2:
+    jgb_data = fred_data.get("日本 10 年期國債殖利率")
+    if jgb_data and not jgb_data["history"].empty:
+        # 取近 5 年月資料，避免圖表過度壓縮
+        recent_history = jgb_data["history"].tail(60)
+        chart_df = pd.DataFrame({"日本 10Y 公債殖利率 (%)": recent_history})
+        st.line_chart(chart_df)
+    else:
+        st.info("日本 10 年期國債殖利率數據加載中或 FRED 金鑰未配置。")
