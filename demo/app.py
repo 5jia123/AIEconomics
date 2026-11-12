@@ -369,8 +369,12 @@ spread_val = f"{latest_spread:+.2f}%" if latest_spread is not None else "無資�
 
 
 def generate_macro_summary(prompt_text, api_key):
-    """嘗試依序呼叫不同模型，遇 503/429 自動退避重試並降級備援"""
-    candidate_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+    """嘗試依序呼叫最新與備援模型，遇高負載或版本汰換自動切換"""
+    candidate_models = [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        "gemini-2.5-flash",
+    ]
     last_err = None
 
     if GENAI_MODE == "google-genai":
@@ -385,7 +389,9 @@ def generate_macro_summary(prompt_text, api_key):
                     return res.text, model_name
                 except Exception as e:
                     last_err = e
-                    if "503" in str(e) or "429" in str(e) or "high demand" in str(e).lower():
+                    err_str = str(e)
+                    # 遇高負載 (503/429) 稍作暫停重試；遇 404 則直接跳下一個備援模型
+                    if "503" in err_str or "429" in err_str or "high demand" in err_str.lower():
                         time.sleep(1.0)
                         continue
                     else:
@@ -403,7 +409,6 @@ def generate_macro_summary(prompt_text, api_key):
                 time.sleep(1.0)
 
     raise last_err if last_err else Exception("所有備援模型皆無法回應")
-
 
 # --- 12. 第五區塊：AI 總體經濟即時短評 ---
 st.subheader("🤖 AI 總體經濟即時短評")
